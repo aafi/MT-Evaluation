@@ -1,0 +1,233 @@
+#!/usr/bin/env python
+import argparse # optparse is deprecated
+from itertools import islice # slicing for iterators
+import sys
+from nltk.stem.porter import *
+from nltk.corpus import wordnet_ic, wordnet as wn
+from nltk import bigrams,trigrams
+import math
+
+def synonyms(arr):
+    syn_arr = []
+    for word in arr:
+        syn_arr.append([lst for ss in wn.synsets(word) for lst in ss.lemma_names])
+    return syn_arr
+
+def word_matches(h, ref):
+    bitvec_ref = [0]*len(ref)
+    bitvec_hyp = [0]*len(h)
+    match = 0
+    for i,w in enumerate(h):
+        if bitvec_hyp[i] == 0:
+            for j,w1 in enumerate(ref):
+                if w == w1 and bitvec_ref[j] == 0:
+                    bitvec_hyp[i] = 1
+                    bitvec_ref[j] = 1
+                    match +=1
+                    break
+    #return sum(1 for w in h if w in ref)
+    return (bitvec_ref, bitvec_hyp, match)
+
+def word_match_stem(bitvec_ref, bitvec_hyp, match, h, ref):
+    for i,w in enumerate(h):
+        if bitvec_hyp[i] == 0:
+            for j,w1 in enumerate(ref):
+                if w == w1 and bitvec_ref[j] == 0:
+                    bitvec_hyp[i] = 1
+                    bitvec_ref[j] = 1
+                    match+=1
+                    break
+
+    return (match, bitvec_ref, bitvec_hyp)
+
+def word_match_syn(bitvec_ref,bitvec_hyp,h_match_stem,h_syn,ref_syn):
+    for i,w in enumerate(h_syn):
+        if bitvec_hyp[i] == 0:
+            for j,w1 in enumerate(ref_syn):
+                if bitvec_ref[j] == 0:
+                    if check_syn(w,w1):
+                        bitvec_hyp[i] = 1
+                        bitvec_ref[j] = 1
+                        h_match_stem+=1
+                        break
+
+    return h_match_stem
+
+def check_syn(h,ref):
+    for syn in h:
+        if syn in ref:
+            return True
+    return False
+
+
+def chunk_count(hyp,ref,hyp_stem,ref_stem,hyp_syn,ref_syn):
+        bitvec = [0]*len(ref)
+        count = 0
+        i = 0
+        a = 0
+        while i < len(hyp):
+            j = 0
+            match = 0
+            while j < len(ref) and i < len(hyp):
+                if (hyp[i] == ref[j] or hyp_stem[i] == ref_stem[j] or check_syn(hyp_syn[i],ref_syn[j])) and bitvec[j] != 1:
+                    bitvec[j] = 1
+                    i+=1
+                    j+=1
+                    match = 1
+                    a = 1
+                else:
+                    j+=1
+                    a = 0
+                    if match == 1:
+                        count+=1
+                        # match = 0
+                        break
+
+            if match == 0:
+                i+=1
+            if (match == 1 and i == len(hyp)) or (match == 1 and j == len(ref) and a == 1) :
+                count+=1
+
+        return count
+
+def length_penalty(h,ref):
+    c = len(h)
+    r = len(ref)
+    if c < r:
+        return math.exp(1-(r/float(c)))
+    elif c > r:
+        return math.exp(1-(c/float(r)))
+    else:
+        return 1
+
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate translation hypotheses.')
+    parser.add_argument('-i', '--input', default='data/hyp1-hyp2-ref',
+            help='input file (default data/hyp1-hyp2-ref)')
+    parser.add_argument('-n', '--num_sentences', default=None, type=int,
+            help='Number of hypothesis pairs to evaluate')
+    parser.add_argument('-a', '--alpha', default=0.5, type=float)
+    parser.add_argument('-b', '--beta', default=0.5, type=float)
+    parser.add_argument('-g', '--gamma', default=0.5, type=float)
+    # note that if x == [1, 2, 3], then x[:None] == x[:] == x (copy); no need for sys.maxint
+    opts = parser.parse_args()
+ 
+    # we create a generator and avoid loading all sentences into a list
+    def sentences():
+        with open(opts.input) as f:
+            for pair in f:
+                yield [sentence.strip().lower().split() for sentence in pair.split(' ||| ')]
+
+    
+    # note: the -n option does not work in the original code
+    for h1, h2, ref in islice(sentences(), opts.num_sentences):
+        rset = set(ref)
+
+        stemmer = PorterStemmer()
+        h1_stem = [stemmer.stem(word) for word in h1]
+        h2_stem = [stemmer.stem(word) for word in h2]
+        ref_stem = [stemmer.stem(word) for word in ref]
+
+        h1_syn = synonyms(h1)
+        h2_syn = synonyms(h2)
+        ref_syn = synonyms(ref)
+
+
+        b1, b3, h1_mat = word_matches(h1, ref)
+        b2, b4, h2_mat = word_matches(h2, ref)
+
+        h1_match_stem, h1_ref, h1_hyp = word_match_stem(b1, b3, h1_mat,h1_stem,ref_stem)
+        h2_match_stem, h2_ref, h2_hyp = word_match_stem(b2, b4, h2_mat,h2_stem,ref_stem)
+
+        h1_match = word_match_syn(h1_ref, h1_hyp, h1_match_stem, h1_syn, ref_syn)
+        h2_match = word_match_syn(h2_ref, h2_hyp, h2_match_stem, h2_syn, ref_syn)
+
+
+        chunk1 = chunk_count(h1,ref,h1_stem,ref_stem,h1_syn,ref_syn)
+        chunk2 = chunk_count(h2,ref,h2_stem,ref_stem,h2_syn,ref_syn)
+
+        #sys.stderr.write("chunk "+str(chunk1)+"\n")
+
+        #sys.stderr.write(str(chunk1)+"\n")
+
+        ref_bigrams = bigrams(" ".join(ref))
+        ref_trigrams = trigrams(" ".join(ref))
+        h1_bigrams = bigrams(" ".join(h1))
+        h1_trigrams = trigrams(" ".join(h1))
+        h2_bigrams = bigrams(" ".join(h2))
+        h2_trigrams = trigrams(" ".join(h2))
+
+        h1_match_bi = sum(1 for bi in set(h1_bigrams) if bi in set(ref_bigrams))
+        h2_match_bi = sum(1 for bi in set(h2_bigrams) if bi in set(ref_bigrams))
+        h1_match_tri = sum(1 for tri in set(h1_trigrams) if tri in set(ref_trigrams))
+        h2_match_tri = sum(1 for tri in set(h2_trigrams) if tri in set(ref_trigrams))
+
+        if len(ref_bigrams) == 0:
+            h1_bi_frac = 0
+        else:
+            h1_bi_frac = h1_match_bi/float(len(ref_bigrams))
+
+        if len(ref_trigrams) == 0:
+            h1_tri_frac = 0
+        else:
+            h1_tri_frac = h1_match_tri/float(len(ref_trigrams))
+
+        if len(ref_bigrams) == 0:
+            h2_bi_frac = 0
+        else:
+            h2_bi_frac = h2_match_bi/float(len(ref_bigrams))
+
+        if len(ref_trigrams) == 0:
+            h2_tri_frac = 0
+        else:
+            h2_tri_frac = h2_match_tri/float(len(ref_trigrams))
+
+
+        #if h1_match != 0 and h2_match !=0:
+        r_h1 = h1_match/float(len(ref))
+        r_h2 = h2_match/float(len(ref))
+        p_h1 = h1_match/float(len(h1))
+        p_h2 = h2_match/float(len(h2))
+
+        # f_mean1 = (9+1)/float((9/(r_h1+1))+(1/(p_h1+1)))
+        # f_mean2 = (9+1)/float((9/(r_h2+1))+(1/(p_h2+1)))
+
+
+        f_mean1 = (p_h1*r_h1)/float(((1-opts.alpha)*r_h1)+(opts.alpha*p_h1)+1)
+        f_mean2 = (p_h2*r_h2)/float(((1-opts.alpha)*r_h2)+(opts.alpha*p_h2)+1)
+
+        frag1 = chunk1/float(h1_match) if h1_match != 0 else 0
+        frag2 = chunk2/float(h2_match) if h2_match != 0 else 0
+
+        penalty1 = opts.gamma*(frag1**opts.beta)
+        penalty2 = opts.gamma*(frag2**opts.beta)
+
+        lp_h1 = length_penalty(h1,ref)
+        lp_h2 = length_penalty(h2,ref)
+
+        #sys.stderr.write(str(h1_bi_frac+h1_tri_frac)+"\n")
+
+        l_h1 = (0.8*(1-penalty1)*f_mean1*lp_h1)+(0.2*(h1_bi_frac+h1_tri_frac))
+        l_h2 = (0.8*(1-penalty2)*f_mean2*lp_h2)+(0.2*(h2_bi_frac+h2_tri_frac))
+
+        #sys.stderr.write("word match "+str(h1_match)+" precision "+str(p_h1)+" recall "+str(r_h1)+" frag "+str(frag1)+" f_mean1 "+str(f_mean1)+" penalty "+str(penalty1)+" final score "+str(l_h1)+" lp "+str(lp_h1)+"\n")
+
+        # else:
+        #     if abs(len(h1)-len(ref)) > abs(len(h2)-len(ref)):
+        #         l_h1 = 0
+        #         l_h2 = 1
+        #     elif abs(len(h1)-len(ref)) < abs(len(h2)-len(ref)):
+        #         l_h1 = 1
+        #         l_h2 = 0
+        #     else:
+        #         l_h1 = 0
+        #         l_h2 = 0
+            
+
+        print(1 if l_h1 > l_h2 else # \begin{cases}
+                (0 if l_h1 == l_h2
+                    else -1)) # \end{cases}
+ 
+# convention to allow import of this file as a module
+if __name__ == '__main__':
+    main()
